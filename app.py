@@ -12,12 +12,11 @@ DB_FILE = 'registro_completo.csv'
 if 'authenticated' not in st.session_state:
     st.session_state['authenticated'] = False
 
+# --- CÓDIGO NUEVO (SEGURO EN PÚBLICO) ---
 def check_login(user, password):
-    if user == "razonadx" and password == "javier26":
+    # Ahora la app busca las claves en la "Caja Fuerte" de Streamlit, no en el código
+    if user == st.secrets["admin_user"] and password == st.secrets["admin_password"]:
         st.session_state['authenticated'] = True
-        st.success("✅ Acceso Docente Autorizado")
-    else:
-        st.error("❌ Credenciales incorrectas")
 
 def logout():
     st.session_state['authenticated'] = False
@@ -203,3 +202,4 @@ if st.session_state['authenticated']:
                 
         else:
             st.info("Aún no hay datos cargados por los estudiantes.")
+
