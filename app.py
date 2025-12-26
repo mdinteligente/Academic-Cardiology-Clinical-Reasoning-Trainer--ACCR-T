@@ -3,9 +3,10 @@ import pandas as pd
 import json
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime, date
+from datetime import datetime
 import pytz
 import altair as alt
+import ast # Para leer listas guardadas como texto
 
 # --- CONFIGURACIÓN ---
 st.set_page_config(page_title="ACCR-T Analytics", page_icon="🩺", layout="wide")
@@ -58,6 +59,26 @@ def guardar_registro(data_list):
     except Exception as e:
         st.error(f"Error guardando: {e}")
         return False
+
+# --- FUNCIÓN AUXILIAR PARA LIMPIAR SESGOS ---
+def parse_sesgos(sesgo_str):
+    """Convierte strings sucios en listas limpias de sesgos"""
+    if not sesgo_str or str(sesgo_str).strip() == "":
+        return []
+    
+    texto = str(sesgo_str).strip()
+    
+    # Intenta interpretar si viene como lista de Python "['A', 'B']"
+    try:
+        if texto.startswith("[") and texto.endswith("]"):
+            lista = ast.literal_eval(texto)
+            if isinstance(lista, list):
+                return [s.strip() for s in lista]
+    except:
+        pass
+    
+    # Si falla, asume separado por comas "A, B, C"
+    return [s.strip() for s in texto.split(',') if s.strip()]
 
 # --- LOGIN ---
 if 'auth' not in st.session_state: st.session_state['auth'] = False
@@ -112,6 +133,13 @@ with tabs[0]:
                     now = datetime.now(TIMEZONE)
                     f_reg = now.strftime("%Y-%m-%d")
                     h_reg = now.strftime("%H:%M:%S")
+                    
+                    # Manejo seguro de sesgos (lista a string)
+                    raw_sesgos = d.get("sesgos_cognitivos", {}).get("detectados", [])
+                    if isinstance(raw_sesgos, list):
+                        str_sesgos = ", ".join(raw_sesgos)
+                    else:
+                        str_sesgos = str(raw_sesgos)
 
                     row = [
                         f_reg, h_reg, grupo, codigo, nombre,
@@ -120,7 +148,7 @@ with tabs[0]:
                         d.get("metadata", {}).get("diagnostico_real"),
                         total_calc, score_dx, score_tx,
                         s_recol, s_sint, s_hipo, s_interp, s_manejo,
-                        ", ".join(d.get("sesgos_cognitivos", {}).get("detectados", [])),
+                        str_sesgos,
                         d.get("traza_cognitiva", {}).get("illness_script_estudiante")
                     ]
                     
@@ -136,96 +164,114 @@ with tabs[1]:
         df = cargar_datos()
         
         if not df.empty:
-            # FILTROS
-            st.markdown("### 🎛️ Panel de Control")
+            # --- FILTROS DE PERSONALIZACIÓN ---
+            st.markdown("### 🎛️ Filtros de Análisis")
             f1, f2, f3 = st.columns(3)
             
-            grupos = ["Todos"] + sorted(df['Grupo'].unique().tolist())
-            sel_grupo = f1.selectbox("Grupo:", grupos)
+            # Filtro 1: Grupo
+            grupos = ["Todos"] + sorted(df['Grupo'].unique().astype(str).tolist())
+            sel_grupo = f1.selectbox("1. Grupo:", grupos)
             
-            if sel_grupo != "Todos":
-                est_list = ["Todos"] + df[df['Grupo'] == sel_grupo]['Nombre'].unique().tolist()
-            else:
-                est_list = ["Todos"] + df['Nombre'].unique().tolist()
-            sel_est = f2.selectbox("Estudiante:", est_list)
+            # Filtro 2: Estudiante (Reactivo)
+            df_temp = df if sel_grupo == "Todos" else df[df['Grupo'] == sel_grupo]
+            ests = ["Todos"] + sorted(df_temp['Nombre'].unique().astype(str).tolist())
+            sel_est = f2.selectbox("2. Estudiante:", ests)
             
-            # APLICAR FILTROS
+            # Filtro 3: CASO ID (NUEVO)
+            if sel_est != "Todos":
+                df_temp = df_temp[df_temp['Nombre'] == sel_est]
+            
+            # Convertimos Caso_ID a string para filtrar bien
+            df['Caso_ID'] = df['Caso_ID'].astype(str)
+            casos_disp = ["Todos"] + sorted(df_temp['Caso_ID'].unique().tolist())
+            sel_caso = f3.selectbox("3. Caso ID:", casos_disp)
+
+            # --- APLICAR FILTROS ---
             df_view = df.copy()
             if sel_grupo != "Todos": df_view = df_view[df_view['Grupo'] == sel_grupo]
             if sel_est != "Todos": df_view = df_view[df_view['Nombre'] == sel_est]
+            if sel_caso != "Todos": df_view = df_view[df_view['Caso_ID'] == sel_caso]
             
-            # KPI
+            # --- KPI ---
             st.divider()
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("Registros", len(df_view))
-            k2.metric("Promedio Global", f"{df_view['Puntaje_Total'].mean():.1f}/10")
-            k3.metric("Promedio Dx (0-8)", f"{df_view['Score_Diagnostico'].mean():.1f}")
-            k4.metric("Promedio Tx (0-2)", f"{df_view['Score_Terapeutico'].mean():.1f}")
+            k2.metric("Nota Global", f"{df_view['Puntaje_Total'].mean():.1f}/10")
+            k3.metric("Nota Diagnóstica", f"{df_view['Score_Diagnostico'].mean():.1f}/8")
+            k4.metric("Nota Terapéutica", f"{df_view['Score_Terapeutico'].mean():.1f}/2")
             
-            # ANÁLISIS DE DOMINIOS
-            st.markdown("### 🔬 Micro-Análisis de Dominios")
-            dominios = {
-                '1. Recolección': 'CRI_Recoleccion',
-                '2. Síntesis (Script)': 'CRI_Sintesis',
-                '3. Hipótesis': 'CRI_Hipotesis',
-                '4. Interpretación': 'CRI_Interpretacion',
-                '5. Manejo (OMS)': 'OMS_Manejo'
-            }
-            avg_data = {k: df_view[v].mean() for k, v in dominios.items()}
-            df_chart = pd.DataFrame(list(avg_data.items()), columns=['Competencia', 'Puntaje Promedio'])
+            # --- DETALLE (HEATMAP) ---
+            st.subheader("📋 Detalle de Resultados")
+            cols_ver = ['Fecha_Registro', 'Nombre', 'Grupo', 'Caso_ID', # CASO ID INCLUIDO
+                        'CRI_Recoleccion', 'CRI_Sintesis', 'CRI_Hipotesis', 
+                        'CRI_Interpretacion', 'OMS_Manejo', 'Puntaje_Total']
             
-            chart = alt.Chart(df_chart).mark_bar().encode(
-                x=alt.X('Competencia', sort=None),
-                y=alt.Y('Puntaje Promedio', scale=alt.Scale(domain=[0, 2])),
-                color=alt.condition(
-                    alt.datum['Puntaje Promedio'] < 1.0,
-                    alt.value('#FF4B4B'),  # Rojo
-                    alt.value('#1C83E1')   # Azul
-                ),
-                tooltip=['Competencia', 'Puntaje Promedio']
-            ).properties(height=300)
-            st.altair_chart(chart, use_container_width=True)
+            cols_style = ['CRI_Recoleccion', 'CRI_Sintesis', 'CRI_Hipotesis', 
+                          'CRI_Interpretacion', 'OMS_Manejo']
             
-            # TABLA SEMÁFORO (CORREGIDA)
-            st.subheader("📋 Detalle por Estudiante")
-            cols_detalle = ['Fecha_Registro', 'Nombre', 'Grupo', 
-                           'CRI_Recoleccion', 'CRI_Sintesis', 'CRI_Hipotesis', 
-                           'CRI_Interpretacion', 'OMS_Manejo', 'Puntaje_Total']
-            
-            cols_numericas_style = ['CRI_Recoleccion', 'CRI_Sintesis', 'CRI_Hipotesis', 
-                                   'CRI_Interpretacion', 'OMS_Manejo']
-            
-            # AQUÍ ESTÁ LA CORRECCIÓN CLAVE: subset=cols_numericas_style
             st.dataframe(
-                df_view[cols_detalle].style.background_gradient(
-                    subset=cols_numericas_style,
-                    cmap='RdYlGn', vmin=0, vmax=2
-                ).format(
-                    "{:.1f}", subset=cols_numericas_style + ['Puntaje_Total']
-                ),
+                df_view[cols_ver].style.background_gradient(
+                    subset=cols_style, cmap='RdYlGn', vmin=0, vmax=2
+                ).format("{:.1f}", subset=cols_style + ['Puntaje_Total']),
                 use_container_width=True
             )
             
-            # SESGOS
+            # --- GRÁFICA DE SESGOS (CORREGIDA) ---
             st.divider()
             col_b1, col_b2 = st.columns(2)
+            
             with col_b1:
-                st.subheader("🧠 Sesgos Detectados")
+                st.subheader("🧠 Tipos de Sesgos Detectados")
                 if 'Sesgos' in df_view.columns:
                     all_biases = []
-                    for s in df_view['Sesgos'].astype(str):
-                        items = [b.strip() for b in s.split(',') if b.strip() and b.strip().lower() != 'ninguno']
-                        all_biases.extend(items)
+                    for s in df_view['Sesgos']:
+                        # Usamos la función de limpieza robusta
+                        limpios = parse_sesgos(s)
+                        # Filtramos 'None', 'Ninguno', cadenas vacías
+                        limpios = [b for b in limpios if len(b) > 2 and 'ningun' not in b.lower()]
+                        all_biases.extend(limpios)
+                    
                     if all_biases:
-                        st.bar_chart(pd.Series(all_biases).value_counts())
-            
-            with col_b2:
-                st.subheader("📝 Scripts (Muestra)")
-                samples = df_view['Illness_Script'].dropna().sample(min(5, len(df_view)))
-                for s in samples: st.text(f"• {s}")
-        else:
-            st.info("Base de datos vacía.")
+                        bias_counts = pd.Series(all_biases).value_counts().reset_index()
+                        bias_counts.columns = ['Tipo de Sesgo', 'Frecuencia']
+                        
+                        # Gráfico Horizontal para leer bien los nombres
+                        chart_bias = alt.Chart(bias_counts).mark_bar().encode(
+                            x='Frecuencia',
+                            y=alt.Y('Tipo de Sesgo', sort='-x'),
+                            tooltip=['Tipo de Sesgo', 'Frecuencia'],
+                            color=alt.value('#FF4B4B')
+                        )
+                        st.altair_chart(chart_bias, use_container_width=True)
+                    else:
+                        st.info("No se detectaron sesgos cognitivos específicos en la selección.")
 
+            # --- ANÁLISIS DE DOMINIOS ---
+            with col_b2:
+                st.subheader("🔬 Rendimiento por Competencia")
+                dominios = {
+                    '1. Recolección': 'CRI_Recoleccion',
+                    '2. Síntesis': 'CRI_Sintesis',
+                    '3. Hipótesis': 'CRI_Hipotesis',
+                    '4. Interpretación': 'CRI_Interpretacion',
+                    '5. Manejo OMS': 'OMS_Manejo'
+                }
+                avg_data = {k: df_view[v].mean() for k, v in dominios.items()}
+                df_chart = pd.DataFrame(list(avg_data.items()), columns=['Competencia', 'Nota'])
+                
+                chart_dom = alt.Chart(df_chart).mark_bar().encode(
+                    x=alt.X('Competencia', sort=None),
+                    y=alt.Y('Nota', scale=alt.Scale(domain=[0, 2])),
+                    color=alt.condition(
+                        alt.datum.Nota < 1.0,
+                        alt.value('red'),
+                        alt.value('steelblue')
+                    )
+                )
+                st.altair_chart(chart_dom, use_container_width=True)
+
+        else:
+            st.info("No hay datos cargados.")
 
 
 
