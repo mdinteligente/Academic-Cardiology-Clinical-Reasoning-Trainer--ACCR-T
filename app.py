@@ -5,12 +5,13 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, date
 import pytz
+import altair as alt # Librería para gráficas avanzadas
 
 # --- CONFIGURACIÓN ---
 st.set_page_config(page_title="ACCR-T Analytics", page_icon="🩺", layout="wide")
 TIMEZONE = pytz.timezone('America/Bogota')
 
-# BASE DE DATOS ESTUDIANTES (Simulada)
+# BASE DE DATOS ESTUDIANTES (Personalizable)
 DB_ESTUDIANTES = {
     "1001": "Juan Pérez", "1002": "Maria Gomez", "1003": "Carlos Ruiz",
     "MED-2025": "Estudiante Prueba", "DOCENTE": "Usuario Prueba"
@@ -30,11 +31,17 @@ def cargar_datos():
         df = pd.DataFrame(data)
         
         if not df.empty:
-            # 1. LIMPIEZA DE NÚMEROS (Evita el TypeError)
-            cols_nums = ['Puntaje_Total', 'Score_Diagnostico', 'Score_Terapeutico']
+            # 1. LIMPIEZA NUMÉRICA ROBUSTA
+            # Columnas maestras (0-10) y Dominios (0-2)
+            cols_nums = [
+                'Puntaje_Total', 'Score_Diagnostico', 'Score_Terapeutico',
+                'CRI_Recoleccion', 'CRI_Sintesis', 'CRI_Hipotesis', 
+                'CRI_Interpretacion', 'OMS_Manejo'
+            ]
+            
             for col in cols_nums:
-                # Convierte texto a número, si falla pone 0.0
                 if col in df.columns:
+                    # Forzar a numérico, errores a 0
                     df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
             
             # 2. LIMPIEZA DE FECHAS
@@ -43,7 +50,7 @@ def cargar_datos():
                 
         return df
     except Exception as e:
-        st.error(f"Error de conexión: {e}")
+        st.error(f"Error conectando a la nube: {e}")
         return pd.DataFrame()
 
 def guardar_registro(data_list):
@@ -52,7 +59,7 @@ def guardar_registro(data_list):
         sheet.append_row(data_list)
         return True
     except Exception as e:
-        st.error(f"Error guardando en la nube: {e}")
+        st.error(f"Error guardando: {e}")
         return False
 
 # --- LOGIN ---
@@ -87,21 +94,22 @@ with tabs[0]:
     
     if nombre:
         with c2:
-            st.info("Pega aquí el código que te dio el GPT al finalizar el caso.")
-            json_txt = st.text_area("JSON del Caso:", height=200)
+            st.info("Pega aquí el código JSON del GPT:")
+            json_txt = st.text_area("JSON:", height=200)
             
-            if st.button("Registrar en Base de Datos", type="primary"):
+            if st.button("Registrar Resultados", type="primary"):
                 try:
                     d = json.loads(json_txt)
                     cri = d.get("evaluacion_cri_ht_s", {})
                     
-                    # Cálculos Matemáticos
+                    # Extracción de Dominios (0-2 pts)
                     s_recol = float(cri.get("recoleccion_datos", {}).get("puntaje", 0))
                     s_sint = float(cri.get("representacion_problema", {}).get("puntaje", 0))
                     s_hipo = float(cri.get("generacion_hipotesis", {}).get("puntaje", 0))
                     s_interp = float(cri.get("interpretacion_datos", {}).get("puntaje", 0))
                     s_manejo = float(cri.get("toma_decisiones", {}).get("puntaje", 0))
                     
+                    # Totales
                     score_dx = s_recol + s_sint + s_hipo + s_interp
                     score_tx = s_manejo
                     total_calc = score_dx + score_tx
@@ -111,7 +119,7 @@ with tabs[0]:
                     f_reg = now.strftime("%Y-%m-%d")
                     h_reg = now.strftime("%H:%M:%S")
 
-                    # Fila para Google Sheets (Orden EXACTO a los encabezados)
+                    # Fila Google Sheets
                     row = [
                         f_reg, h_reg, grupo, codigo, nombre,
                         d.get("metadata", {}).get("caso_id"),
@@ -125,100 +133,121 @@ with tabs[0]:
                     
                     if guardar_registro(row):
                         st.balloons()
-                        st.success(f"✅ Registrado: {f_reg} a las {h_reg}")
+                        st.success(f"✅ Registrado: {f_reg} - {h_reg}")
                 except Exception as e:
-                    st.error(f"Error en el formato del JSON: {e}")
+                    st.error(f"Error JSON: {e}")
 
-# --- PESTAÑA 2: DOCENTE ---
+# --- PESTAÑA 2: DOCENTE (ANALÍTICA DETALLADA) ---
 with tabs[1]:
     if st.session_state['auth']:
         df = cargar_datos()
+        
         if not df.empty:
-            st.markdown("### 🎛️ Filtros de Resultados")
-            
-            # Fila 1: Filtros de Identificación
+            # --- FILTROS ---
+            st.markdown("### 🎛️ Panel de Control")
             f1, f2, f3 = st.columns(3)
             
-            # Filtro Fecha
-            fechas_disp = df['Fecha_dt'].unique()
-            if len(fechas_disp) > 0:
-                min_f, max_f = min(fechas_disp), max(fechas_disp)
-                rango_fecha = f1.date_input("Rango de Fechas", [min_f, max_f])
-            else:
-                rango_fecha = [date.today(), date.today()]
-
-            # Filtro Grupo
             grupos = ["Todos"] + sorted(df['Grupo'].unique().tolist())
-            sel_grupo = f2.selectbox("Grupo:", grupos)
+            sel_grupo = f1.selectbox("Grupo:", grupos)
             
-            # Filtro Estudiante (Reactivo)
             if sel_grupo != "Todos":
-                ests = ["Todos"] + df[df['Grupo'] == sel_grupo]['Nombre'].unique().tolist()
+                est_list = ["Todos"] + df[df['Grupo'] == sel_grupo]['Nombre'].unique().tolist()
             else:
-                ests = ["Todos"] + df['Nombre'].unique().tolist()
-            sel_est = f3.selectbox("Estudiante:", ests)
-
-            # Fila 2: Filtros de Notas (Sliders independientes)
-            st.markdown("---")
-            st.markdown("#### 🎯 Filtrar por Desempeño")
-            s1, s2, s3 = st.columns(3)
-            min_tot = s1.slider("Global Mínimo (0-10)", 0.0, 10.0, 0.0, step=0.5)
-            min_dx = s2.slider("Diagnóstico Mínimo (0-8)", 0.0, 8.0, 0.0, step=0.5)
-            min_tx = s3.slider("Terapéutico Mínimo (0-2)", 0.0, 2.0, 0.0, step=0.5)
-
-            # --- LÓGICA DE FILTRADO ---
+                est_list = ["Todos"] + df['Nombre'].unique().tolist()
+            sel_est = f2.selectbox("Estudiante:", est_list)
+            
+            # Lógica de Filtrado
             df_view = df.copy()
-            
-            # Aplicar Fechas
-            if len(rango_fecha) == 2:
-                df_view = df_view[
-                    (df_view['Fecha_dt'] >= rango_fecha[0]) & 
-                    (df_view['Fecha_dt'] <= rango_fecha[1])
-                ]
-            
-            # Aplicar Grupo/Estudiante
             if sel_grupo != "Todos": df_view = df_view[df_view['Grupo'] == sel_grupo]
             if sel_est != "Todos": df_view = df_view[df_view['Nombre'] == sel_est]
             
-            # Aplicar Notas
-            df_view = df_view[
-                (df_view['Puntaje_Total'] >= min_tot) &
-                (df_view['Score_Diagnostico'] >= min_dx) &
-                (df_view['Score_Terapeutico'] >= min_tx)
-            ]
-
-            # --- VISUALIZACIÓN ---
+            # --- KPI MACRO ---
             st.divider()
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Registros", len(df_view))
+            k2.metric("Promedio Global", f"{df_view['Puntaje_Total'].mean():.1f}/10")
+            k3.metric("Promedio Dx (0-8)", f"{df_view['Score_Diagnostico'].mean():.1f}")
+            k4.metric("Promedio Tx (0-2)", f"{df_view['Score_Terapeutico'].mean():.1f}")
             
-            # Métricas
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Registros Filtrados", len(df_view))
-            if not df_view.empty:
-                m2.metric("Prom. Global", f"{df_view['Puntaje_Total'].mean():.1f}")
-                m3.metric("Prom. Diagnóstico", f"{df_view['Score_Diagnostico'].mean():.1f}")
-                m4.metric("Prom. Terapéutico", f"{df_view['Score_Terapeutico'].mean():.1f}")
+            # --- ANÁLISIS POR COMPETENCIAS (GRANULAR) ---
+            st.markdown("### 🔬 Micro-Análisis de Dominios")
+            st.caption("Comparativa de promedios por cada competencia evaluada (Escala 0 a 2 puntos).")
             
-            # Tabla
-            st.subheader("📋 Planilla de Notas")
+            # Preparar datos para gráfica
+            dominios = {
+                '1. Recolección': 'CRI_Recoleccion',
+                '2. Síntesis (Script)': 'CRI_Sintesis',
+                '3. Hipótesis': 'CRI_Hipotesis',
+                '4. Interpretación': 'CRI_Interpretacion',
+                '5. Manejo (OMS)': 'OMS_Manejo'
+            }
+            
+            # Calcular promedios
+            avg_data = {}
+            for label, col in dominios.items():
+                avg_data[label] = df_view[col].mean()
+            
+            df_chart = pd.DataFrame(list(avg_data.items()), columns=['Competencia', 'Puntaje Promedio'])
+            
+            # Colores condicionales
+            chart = alt.Chart(df_chart).mark_bar().encode(
+                x=alt.X('Competencia', sort=None),
+                y=alt.Y('Puntaje Promedio', scale=alt.Scale(domain=[0, 2])),
+                color=alt.condition(
+                    alt.datum['Puntaje Promedio'] < 1.0,
+                    alt.value('red'),  # Rojo si reprueba
+                    alt.value('steelblue') # Azul si aprueba
+                ),
+                tooltip=['Competencia', 'Puntaje Promedio']
+            ).properties(height=300)
+            
+            st.altair_chart(chart, use_container_width=True)
+            
+            # --- DETALLE DE ESTUDIANTES (HEATMAP) ---
+            st.subheader("📋 Detalle por Estudiante (Semáforo)")
+            st.caption("Identifica rápidamente quién falló en qué área.")
+            
+            cols_detalle = ['Fecha_Registro', 'Nombre', 'Grupo', 
+                           'CRI_Recoleccion', 'CRI_Sintesis', 'CRI_Hipotesis', 
+                           'CRI_Interpretacion', 'OMS_Manejo', 'Puntaje_Total']
+            
+            # Formateo con Pandas Styler (Mapa de calor)
             st.dataframe(
-                df_view[['Fecha_Registro', 'Grupo', 'Nombre', 'Caso_ID', 'Puntaje_Total', 'Score_Diagnostico', 'Score_Terapeutico', 'Sesgos']],
+                df_view[cols_detalle].style.background_gradient(
+                    subset=['CRI_Recoleccion', 'CRI_Sintesis', 'CRI_Hipotesis', 
+                            'CRI_Interpretacion', 'OMS_Manejo'],
+                    cmap='RdYlGn', vmin=0, vmax=2
+                ).format("{:.1f}"),
                 use_container_width=True
             )
             
-            # Gráficas
-            g1, g2 = st.columns(2)
-            with g1:
-                st.caption("Correlación: Buen Diagnóstico vs Buen Tratamiento")
-                st.scatter_chart(df_view, x='Score_Diagnostico', y='Score_Terapeutico', color='Grupo')
+            # --- ANÁLISIS DE SESGOS ---
+            st.divider()
+            col_b1, col_b2 = st.columns(2)
             
-            with g2:
-                st.caption("Evolución Temporal del Grupo")
-                # Agrupar por fecha para ver tendencia
-                if not df_view.empty:
-                    trend = df_view.groupby('Fecha_Registro')['Puntaje_Total'].mean()
-                    st.line_chart(trend)
+            with col_b1:
+                st.subheader("🧠 Sesgos Cognitivos Frecuentes")
+                if 'Sesgos' in df_view.columns:
+                    all_biases = []
+                    for s in df_view['Sesgos'].astype(str):
+                        # Limpiar y separar
+                        items = [b.strip() for b in s.split(',') if b.strip() and b.strip().lower() != 'ninguno']
+                        all_biases.extend(items)
+                    
+                    if all_biases:
+                        st.bar_chart(pd.Series(all_biases).value_counts())
+                    else:
+                        st.info("No se han detectado sesgos significativos.")
+
+            with col_b2:
+                st.subheader("📝 Illness Scripts (Cualitativo)")
+                st.caption("Muestra aleatoria de 5 representaciones del problema escritas por estudiantes.")
+                samples = df_view['Illness_Script'].dropna().sample(min(5, len(df_view)))
+                for i, script in enumerate(samples):
+                    st.text(f"📝 {script}")
 
         else:
-            st.info("La base de datos está vacía. Esperando registros de estudiantes.")
+            st.info("Base de datos vacía.")
+
 
 
