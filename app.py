@@ -1,205 +1,254 @@
 import streamlit as st
 import pandas as pd
 import json
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, timedelta
-import os
 
-# --- 1. CONFIGURACIÓN INICIAL ---
-st.set_page_config(page_title="ACCR-T Portal", page_icon="🔒", layout="wide")
-DB_FILE = 'registro_completo.csv'
+# --- 1. CONFIGURACIÓN Y BASES DE CONOCIMIENTO ---
+st.set_page_config(page_title="ACCR-T Portal", page_icon="🫀", layout="wide")
 
-# --- 2. GESTIÓN DE ESTADO (SESIÓN) ---
+# BASE DE DATOS DE ESTUDIANTES (Código: Nombre)
+# En el futuro, esto podría venir de otro Excel.
+DB_ESTUDIANTES = {
+    "1001": "Juan Pérez",
+    "1002": "Maria Gomez",
+    "1003": "Carlos Ruiz",
+    "MED-2025": "Estudiante Prueba"
+}
+
+# DICCIONARIO DE SESGOS (Educativo)
+DICT_SESGOS = {
+    "Cierre Prematuro": "Aceptar un diagnóstico inicial sin buscar evidencia contraria.",
+    "Anclaje": "Aferrarse a un dato inicial (ej. troponina normal) ignorando la clínica.",
+    "Disponibilidad": "Diagnosticar lo que se ha visto recientemente o es más memorable.",
+    "Confirmación": "Buscar solo datos que apoyen tu idea y descartar los que la niegan.",
+    "Representatividad": "Juzgar por prototipos clásicos ignorando presentaciones atípicas."
+}
+
+# --- 2. CONEXIÓN A GOOGLE SHEETS ---
+def conectar_google_sheet():
+    # Usamos los secretos cargados en Streamlit Cloud
+    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+    creds_dict = st.secrets["gcp_service_account"]
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    client = gspread.authorize(creds)
+    # Abre la hoja por nombre (Asegúrate de haberla creado y compartido en Drive)
+    sheet = client.open("registro_accr_t").sheet1 
+    return sheet
+
+def cargar_datos():
+    try:
+        sheet = conectar_google_sheet()
+        data = sheet.get_all_records()
+        if not data:
+            return pd.DataFrame()
+        return pd.DataFrame(data)
+    except Exception as e:
+        st.error(f"Error conectando a Google Sheets: {e}")
+        return pd.DataFrame()
+
+def guardar_registro(data_dict):
+    try:
+        sheet = conectar_google_sheet()
+        # Convertir diccionario a lista de valores respetando el orden de columnas si fuera necesario
+        # Para simplicidad, append_row usa una lista.
+        valores = list(data_dict.values())
+        sheet.append_row(valores)
+        return True
+    except Exception as e:
+        st.error(f"Error guardando en la nube: {e}")
+        return False
+
+# --- 3. AUTENTICACIÓN DOCENTE ---
 if 'authenticated' not in st.session_state:
     st.session_state['authenticated'] = False
 
-# --- CÓDIGO NUEVO (SEGURO EN PÚBLICO) ---
 def check_login(user, password):
-    # Ahora la app busca las claves en la "Caja Fuerte" de Streamlit, no en el código
     if user == st.secrets["admin_user"] and password == st.secrets["admin_password"]:
         st.session_state['authenticated'] = True
+    else:
+        st.error("❌ Credenciales incorrectas")
 
-def logout():
-    st.session_state['authenticated'] = False
-
-# --- 3. FUNCIONES DE BASE DE DATOS ---
-def cargar_datos():
-    if not os.path.exists(DB_FILE):
-        cols = [
-            "Fecha_Registro", "Estudiante", "Caso_ID", "Nivel", "Dx_Real", "Puntaje_Total",
-            "Hora_Inicio", "Hora_Fin", "Duracion_Minutos",
-            "Illness_Script", "Hipotesis", "Manejo",
-            "Score_Recoleccion", "Score_Sintesis", "Score_Hipotesis", "Score_Interp", "Score_Manejo",
-            "Sesgos", "JSON_Raw"
-        ]
-        return pd.DataFrame(columns=cols)
-    return pd.read_csv(DB_FILE)
-
-def guardar_registro(data_dict):
-    df = cargar_datos()
-    new_row = pd.DataFrame([data_dict])
-    df = pd.concat([df, new_row], ignore_index=True)
-    df.to_csv(DB_FILE, index=False)
-
-# --- 4. BARRA LATERAL (IDENTIFICACIÓN Y LOGIN) ---
+# --- 4. INTERFAZ ---
 with st.sidebar:
-    st.image("https://img.icons8.com/color/96/heart-with-pulse.png", width=50)
-    st.title("ACCR-T Portal")
-    
-    # --- ZONA DE ESTUDIANTE (Siempre visible) ---
-    st.markdown("### 👨‍🎓 Zona Estudiante")
-    student_id = st.text_input("Nombre / Código:", key="student_id", placeholder="Ej. Juan Pérez - 102030")
-    
+    st.title("🫀 ACCR-T Portal")
     st.markdown("---")
     
-    # --- ZONA DOCENTE (Login) ---
-    st.markdown("### 👨‍🏫 Zona Docente")
-    
-    if st.session_state['authenticated']:
-        st.success("Modo Administrador Activo")
-        if st.button("Cerrar Sesión"):
-            logout()
-            st.rerun()
-    else:
-        with st.expander("Acceso Privado"):
-            user_input = st.text_input("Usuario")
-            pass_input = st.text_input("Contraseña", type="password")
-            if st.button("Ingresar"):
-                check_login(user_input, pass_input)
+    # LOGIN DOCENTE
+    if not st.session_state['authenticated']:
+        with st.expander("🔐 Acceso Docente"):
+            u = st.text_input("Usuario")
+            p = st.text_input("Clave", type="password")
+            if st.button("Entrar"):
+                check_login(u, p)
                 st.rerun()
+    else:
+        st.success(f"Docente: {st.secrets['admin_user']}")
+        if st.button("Cerrar Sesión"):
+            st.session_state['authenticated'] = False
+            st.rerun()
 
-# --- 5. INTERFAZ PRINCIPAL ---
+# PESTAÑAS
+tabs = st.tabs(["👨‍🎓 Zona Estudiante", "👨‍🏫 Tablero de Control (Docente)"])
 
-# Si el docente está logueado, ve dos pestañas. Si no, solo ve una.
-tabs_list = ["📥 Carga de Archivos (Estudiantes)"]
-if st.session_state['authenticated']:
-    tabs_list.append("📊 Dashboard Docente (Privado)")
-
-tabs = st.tabs(tabs_list)
-
-# --- PESTAÑA 1: ESTUDIANTES (PÚBLICA) ---
+# --- ZONA ESTUDIANTE ---
 with tabs[0]:
-    st.header("Registro de Actividad Clínica")
-    st.info("Instrucciones: Al finalizar el caso en el GPT, copia el bloque de código JSON y pégalo abajo.")
-
-    col_izq, col_der = st.columns([1, 1])
+    st.header("Registro de Simulación Clínica")
+    st.markdown("Ingrese su código para desbloquear el formulario.")
     
-    with col_izq:
-        st.subheader("1. Cálculo de Tiempos")
-        ahora = datetime.now()
-        h_inicio = st.time_input("Hora de Inicio:", value=(ahora - timedelta(minutes=20)).time())
-        h_fin = st.time_input("Hora de Finalización:", value=ahora.time())
+    col_auth, col_form = st.columns([1, 2])
+    
+    with col_auth:
+        codigo_input = st.text_input("🆔 Tu Código Estudiantil:", placeholder="Ej. 1001")
+        nombre_estudiante = DB_ESTUDIANTES.get(codigo_input)
         
-        # Calcular duración
-        t_inicio = datetime.combine(datetime.today(), h_inicio)
-        t_fin = datetime.combine(datetime.today(), h_fin)
-        if t_fin < t_inicio: t_fin += timedelta(days=1) # Cambio de día
-        duracion = t_fin - t_inicio
-        minutos_totales = int(duracion.total_seconds() / 60)
-        
-        st.metric("Tiempo Invertido", f"{minutos_totales} min")
+        if codigo_input and not nombre_estudiante:
+            st.error("⚠️ Código no reconocido. Verifique.")
+        elif nombre_estudiante:
+            st.success(f"Bienvenido/a: **{nombre_estudiante}**")
+    
+    # Solo mostrar formulario si el estudiante es válido
+    if nombre_estudiante:
+        with col_form:
+            st.info("Pega aquí el código JSON generado por el GPT al final del caso.")
+            json_input = st.text_area("Código JSON:", height=200)
+            
+            # Tiempos Flexibles (Texto libre con validación básica)
+            c1, c2, c3 = st.columns(3)
+            fecha_manual = c1.date_input("Fecha Realización", datetime.today())
+            hora_inicio = c2.text_input("Hora Inicio (Militar HH:MM)", placeholder="14:00")
+            hora_fin = c3.text_input("Hora Final (Militar HH:MM)", placeholder="14:45")
+            
+            if st.button("🚀 Enviar Registro a la Nube", type="primary"):
+                if not json_input:
+                    st.error("Falta el JSON.")
+                elif not hora_inicio or not hora_fin:
+                    st.error("Faltan los tiempos.")
+                else:
+                    try:
+                        # Parsear JSON
+                        d = json.loads(json_input)
+                        
+                        # Cálculo de tiempo (rudimentario para flexibilidad)
+                        try:
+                            fmt = "%H:%M"
+                            t1 = datetime.strptime(hora_inicio, fmt)
+                            t2 = datetime.strptime(hora_fin, fmt)
+                            duracion = (t2 - t1).seconds // 60
+                            if duracion < 0: duracion += 1440 # Cambio de día
+                        except:
+                            duracion = 0 # Error de formato
+                            st.warning("Formato de hora no válido, se registró tiempo 0.")
 
-    with col_der:
-        st.subheader("2. Carga de Datos")
-        json_input = st.text_area("Pega tu JSON aquí:", height=200)
-        
-        if st.button("Enviar Registro", type="primary"):
-            if not student_id:
-                st.error("⚠️ Falta tu Nombre/Código.")
-            elif not json_input:
-                st.error("⚠️ Falta el código JSON.")
-            else:
-                try:
-                    d = json.loads(json_input)
-                    # Extracción segura de datos
-                    registro = {
-                        "Fecha_Registro": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                        "Estudiante": student_id,
-                        "Caso_ID": d.get("metadata", {}).get("caso_id", "N/A"),
-                        "Nivel": d.get("metadata", {}).get("nivel", "N/A"),
-                        "Dx_Real": d.get("metadata", {}).get("diagnostico_real", "N/A"),
-                        "Puntaje_Total": d.get("evaluacion_cri_ht_s", {}).get("total_sobre_10", 0),
-                        "Hora_Inicio": h_inicio.strftime("%H:%M"),
-                        "Hora_Fin": h_fin.strftime("%H:%M"),
-                        "Duracion_Minutos": minutos_totales,
-                        # Datos Cognitivos
-                        "Illness_Script": d.get("traza_cognitiva", {}).get("illness_script_estudiante", ""),
-                        "Hipotesis": str(d.get("traza_cognitiva", {}).get("hipotesis_planteadas", "")),
-                        "Manejo": d.get("traza_cognitiva", {}).get("tratamiento_propuesto", ""),
-                        # Scores
-                        "Score_Recoleccion": d.get("evaluacion_cri_ht_s", {}).get("recoleccion_datos", {}).get("puntaje", 0),
-                        "Score_Sintesis": d.get("evaluacion_cri_ht_s", {}).get("representacion_problema", {}).get("puntaje", 0),
-                        "Score_Hipotesis": d.get("evaluacion_cri_ht_s", {}).get("generacion_hipotesis", {}).get("puntaje", 0),
-                        "Score_Interp": d.get("evaluacion_cri_ht_s", {}).get("interpretacion_datos", {}).get("puntaje", 0),
-                        "Score_Manejo": d.get("evaluacion_cri_ht_s", {}).get("toma_decisiones", {}).get("puntaje", 0),
-                        "Sesgos": str(d.get("sesgos_cognitivos", {}).get("detectados", "")),
-                        "JSON_Raw": json_input
-                    }
-                    guardar_registro(registro)
-                    st.success("✅ ¡Registro Exitoso! Tus datos han sido enviados al docente.")
-                    st.balloons()
-                except Exception as e:
-                    st.error(f"Error en el formato JSON: {e}")
+                        # Estructura Plana para Google Sheets
+                        registro = {
+                            "Fecha": str(fecha_manual),
+                            "Codigo": codigo_input,
+                            "Nombre": nombre_estudiante,
+                            "Caso_ID": d.get("metadata", {}).get("caso_id", "N/A"),
+                            "Nivel": d.get("metadata", {}).get("nivel", "N/A"),
+                            "Dx_Real": d.get("metadata", {}).get("diagnostico_real", "N/A"),
+                            "Puntaje_Total": d.get("evaluacion_cri_ht_s", {}).get("total_sobre_10", 0),
+                            # Tiempos
+                            "H_Inicio": hora_inicio,
+                            "H_Fin": hora_fin,
+                            "Minutos": duracion,
+                            # Dominios CRI-HT-S
+                            "CRI_Recoleccion": d.get("evaluacion_cri_ht_s", {}).get("recoleccion_datos", {}).get("puntaje", 0),
+                            "CRI_Sintesis": d.get("evaluacion_cri_ht_s", {}).get("representacion_problema", {}).get("puntaje", 0),
+                            "CRI_Hipotesis": d.get("evaluacion_cri_ht_s", {}).get("generacion_hipotesis", {}).get("puntaje", 0),
+                            "CRI_Interpretacion": d.get("evaluacion_cri_ht_s", {}).get("interpretacion_datos", {}).get("puntaje", 0),
+                            # Guía OMS (Manejo)
+                            "OMS_Manejo": d.get("evaluacion_cri_ht_s", {}).get("toma_decisiones", {}).get("puntaje", 0),
+                            # Sesgos
+                            "Sesgos": ", ".join(d.get("sesgos_cognitivos", {}).get("detectados", [])),
+                            "Illness_Script": d.get("traza_cognitiva", {}).get("illness_script_estudiante", "")
+                        }
+                        
+                        exito = guardar_registro(registro)
+                        if exito:
+                            st.success(f"✅ Registro guardado en Google Drive. Duración: {duracion} min.")
+                            st.balloons()
+                            
+                    except json.JSONDecodeError:
+                        st.error("El texto no es un JSON válido.")
 
-# --- PESTAÑA 2: DOCENTE (PRIVADA) ---
-if st.session_state['authenticated']:
-    with tabs[1]:
-        st.markdown("## 📊 Panel de Control Docente")
-        st.markdown(f"**Usuario:** {st.session_state.get('user', 'razonadx')} | **Estado:** Conectado")
+# --- ZONA DOCENTE ---
+with tabs[1]:
+    if st.session_state['authenticated']:
+        st.markdown("## 📊 Tablero de Control Académico")
         
         df = cargar_datos()
         
         if not df.empty:
-            # Métricas Globales
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Total Casos Resueltos", len(df))
-            promedio_nota = pd.to_numeric(df['Puntaje_Total'], errors='coerce').mean()
-            m2.metric("Promedio Curso (CRI-HT-S)", f"{promedio_nota:.1f}/10")
-            promedio_tiempo = pd.to_numeric(df['Duracion_Minutos'], errors='coerce').mean()
-            m3.metric("Tiempo Promedio/Caso", f"{promedio_tiempo:.0f} min")
-            
-            st.divider()
-            
-            # Tabla Maestra con Filtros
-            st.subheader("Base de Datos Completa")
-            
-            # Filtros dinámicos
-            filtro_estudiante = st.multiselect("Filtrar por Estudiante:", options=df['Estudiante'].unique())
-            filtro_nivel = st.multiselect("Filtrar por Nivel:", options=df['Nivel'].unique())
+            # --- FILTROS DE PERSONALIZACIÓN ---
+            st.sidebar.markdown("### 🔍 Filtros Docente")
+            filtro_est = st.sidebar.multiselect("Estudiante:", options=df['Nombre'].unique())
+            filtro_caso = st.sidebar.multiselect("Caso ID:", options=df['Caso_ID'].unique())
             
             df_view = df.copy()
-            if filtro_estudiante:
-                df_view = df_view[df_view['Estudiante'].isin(filtro_estudiante)]
-            if filtro_nivel:
-                df_view = df_view[df_view['Nivel'].isin(filtro_nivel)]
-                
-            st.dataframe(
-                df_view[['Fecha_Registro', 'Estudiante', 'Caso_ID', 'Dx_Real', 'Puntaje_Total', 'Duracion_Minutos', 'Sesgos']],
-                use_container_width=True
-            )
+            if filtro_est: df_view = df_view[df_view['Nombre'].isin(filtro_est)]
+            if filtro_caso: df_view = df_view[df_view['Caso_ID'].isin(filtro_caso)]
+
+            # --- KPI ---
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Casos Evaluados", len(df_view))
             
-            # Descarga de Datos
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                "📥 Descargar Reporte Completo (CSV)",
-                csv,
-                "reporte_clinico.csv",
-                "text/csv",
-                key='download-csv'
-            )
-            
+            # Promedios seguros
+            try:
+                avg_score = df_view['Puntaje_Total'].mean()
+                avg_oms = df_view['OMS_Manejo'].mean()
+                k2.metric("Promedio Global", f"{avg_score:.1f}/10")
+                k3.metric("Adherencia OMS (Manejo)", f"{avg_oms:.1f}/2")
+            except:
+                pass
+
             st.divider()
+
+            # --- ANÁLISIS POR DOMINIOS (CRI-HT-S) ---
+            st.subheader("📡 Radar de Competencias (CRI-HT-S)")
+            dominios = ['CRI_Recoleccion', 'CRI_Sintesis', 'CRI_Hipotesis', 'CRI_Interpretacion', 'OMS_Manejo']
+            try:
+                # Promedio por dominio para los datos filtrados
+                radar_data = df_view[dominios].mean().reset_index()
+                radar_data.columns = ['Dominio', 'Puntaje Promedio (0-2)']
+                st.bar_chart(radar_data.set_index('Dominio'))
+            except:
+                st.info("Faltan datos numéricos para graficar.")
+
+            st.divider()
+
+            # --- ANÁLISIS DE SESGOS COGNITIVOS ---
+            c_bias, c_dict = st.columns([2, 1])
+            with c_bias:
+                st.subheader("🧠 Sesgos Detectados")
+                if 'Sesgos' in df_view.columns:
+                    # Contar frecuencia de sesgos
+                    all_biases = []
+                    for s in df_view['Sesgos'].astype(str):
+                        all_biases.extend([b.strip() for b in s.split(',') if b.strip()])
+                    
+                    if all_biases:
+                        bias_counts = pd.Series(all_biases).value_counts()
+                        st.bar_chart(bias_counts)
+                    else:
+                        st.write("No se han detectado sesgos en la selección actual.")
+
+            with c_dict:
+                with st.expander("📚 Diccionario de Sesgos"):
+                    for k, v in DICT_SESGOS.items():
+                        st.markdown(f"**{k}:** {v}")
+
+            st.divider()
+
+            # --- TABLA DETALLADA ---
+            st.subheader("📋 Registro Detallado")
+            st.dataframe(df_view, use_container_width=True)
             
-            # Análisis Gráfico
-            c1, c2 = st.columns(2)
-            with c1:
-                st.subheader("📈 Rendimiento vs Tiempo")
-                st.scatter_chart(df, x='Duracion_Minutos', y='Puntaje_Total', color='Nivel')
-            
-            with c2:
-                st.subheader("🧠 Sesgos Frecuentes")
-                # Nube de palabras simple de sesgos
-                st.write(df['Sesgos'].value_counts())
-                
         else:
-            st.info("Aún no hay datos cargados por los estudiantes.")
+            st.warning("La base de datos en Google Sheets está vacía o no se pudo conectar.")
+    else:
+        st.info("🔒 Inicie sesión en la barra lateral para ver los datos.")
+
 
