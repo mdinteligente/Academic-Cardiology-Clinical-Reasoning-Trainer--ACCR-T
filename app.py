@@ -5,13 +5,13 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, date
 import pytz
-import altair as alt # Librería para gráficas avanzadas
+import altair as alt
 
 # --- CONFIGURACIÓN ---
 st.set_page_config(page_title="ACCR-T Analytics", page_icon="🩺", layout="wide")
 TIMEZONE = pytz.timezone('America/Bogota')
 
-# BASE DE DATOS ESTUDIANTES (Personalizable)
+# BASE DE DATOS ESTUDIANTES
 DB_ESTUDIANTES = {
     "1001": "Juan Pérez", "1002": "Maria Gomez", "1003": "Carlos Ruiz",
     "MED-2025": "Estudiante Prueba", "DOCENTE": "Usuario Prueba"
@@ -31,20 +31,17 @@ def cargar_datos():
         df = pd.DataFrame(data)
         
         if not df.empty:
-            # 1. LIMPIEZA NUMÉRICA ROBUSTA
-            # Columnas maestras (0-10) y Dominios (0-2)
+            # LIMPIEZA NUMÉRICA
             cols_nums = [
                 'Puntaje_Total', 'Score_Diagnostico', 'Score_Terapeutico',
                 'CRI_Recoleccion', 'CRI_Sintesis', 'CRI_Hipotesis', 
                 'CRI_Interpretacion', 'OMS_Manejo'
             ]
-            
             for col in cols_nums:
                 if col in df.columns:
-                    # Forzar a numérico, errores a 0
                     df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
             
-            # 2. LIMPIEZA DE FECHAS
+            # LIMPIEZA DE FECHAS
             if 'Fecha_Registro' in df.columns:
                 df['Fecha_dt'] = pd.to_datetime(df['Fecha_Registro'], errors='coerce').dt.date
                 
@@ -102,24 +99,20 @@ with tabs[0]:
                     d = json.loads(json_txt)
                     cri = d.get("evaluacion_cri_ht_s", {})
                     
-                    # Extracción de Dominios (0-2 pts)
                     s_recol = float(cri.get("recoleccion_datos", {}).get("puntaje", 0))
                     s_sint = float(cri.get("representacion_problema", {}).get("puntaje", 0))
                     s_hipo = float(cri.get("generacion_hipotesis", {}).get("puntaje", 0))
                     s_interp = float(cri.get("interpretacion_datos", {}).get("puntaje", 0))
                     s_manejo = float(cri.get("toma_decisiones", {}).get("puntaje", 0))
                     
-                    # Totales
                     score_dx = s_recol + s_sint + s_hipo + s_interp
                     score_tx = s_manejo
                     total_calc = score_dx + score_tx
                     
-                    # Tiempos
                     now = datetime.now(TIMEZONE)
                     f_reg = now.strftime("%Y-%m-%d")
                     h_reg = now.strftime("%H:%M:%S")
 
-                    # Fila Google Sheets
                     row = [
                         f_reg, h_reg, grupo, codigo, nombre,
                         d.get("metadata", {}).get("caso_id"),
@@ -137,13 +130,13 @@ with tabs[0]:
                 except Exception as e:
                     st.error(f"Error JSON: {e}")
 
-# --- PESTAÑA 2: DOCENTE (ANALÍTICA DETALLADA) ---
+# --- PESTAÑA 2: DOCENTE ---
 with tabs[1]:
     if st.session_state['auth']:
         df = cargar_datos()
         
         if not df.empty:
-            # --- FILTROS ---
+            # FILTROS
             st.markdown("### 🎛️ Panel de Control")
             f1, f2, f3 = st.columns(3)
             
@@ -156,12 +149,12 @@ with tabs[1]:
                 est_list = ["Todos"] + df['Nombre'].unique().tolist()
             sel_est = f2.selectbox("Estudiante:", est_list)
             
-            # Lógica de Filtrado
+            # APLICAR FILTROS
             df_view = df.copy()
             if sel_grupo != "Todos": df_view = df_view[df_view['Grupo'] == sel_grupo]
             if sel_est != "Todos": df_view = df_view[df_view['Nombre'] == sel_est]
             
-            # --- KPI MACRO ---
+            # KPI
             st.divider()
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("Registros", len(df_view))
@@ -169,11 +162,8 @@ with tabs[1]:
             k3.metric("Promedio Dx (0-8)", f"{df_view['Score_Diagnostico'].mean():.1f}")
             k4.metric("Promedio Tx (0-2)", f"{df_view['Score_Terapeutico'].mean():.1f}")
             
-            # --- ANÁLISIS POR COMPETENCIAS (GRANULAR) ---
+            # ANÁLISIS DE DOMINIOS
             st.markdown("### 🔬 Micro-Análisis de Dominios")
-            st.caption("Comparativa de promedios por cada competencia evaluada (Escala 0 a 2 puntos).")
-            
-            # Preparar datos para gráfica
             dominios = {
                 '1. Recolección': 'CRI_Recoleccion',
                 '2. Síntesis (Script)': 'CRI_Sintesis',
@@ -181,73 +171,61 @@ with tabs[1]:
                 '4. Interpretación': 'CRI_Interpretacion',
                 '5. Manejo (OMS)': 'OMS_Manejo'
             }
-            
-            # Calcular promedios
-            avg_data = {}
-            for label, col in dominios.items():
-                avg_data[label] = df_view[col].mean()
-            
+            avg_data = {k: df_view[v].mean() for k, v in dominios.items()}
             df_chart = pd.DataFrame(list(avg_data.items()), columns=['Competencia', 'Puntaje Promedio'])
             
-            # Colores condicionales
             chart = alt.Chart(df_chart).mark_bar().encode(
                 x=alt.X('Competencia', sort=None),
                 y=alt.Y('Puntaje Promedio', scale=alt.Scale(domain=[0, 2])),
                 color=alt.condition(
                     alt.datum['Puntaje Promedio'] < 1.0,
-                    alt.value('red'),  # Rojo si reprueba
-                    alt.value('steelblue') # Azul si aprueba
+                    alt.value('#FF4B4B'),  # Rojo
+                    alt.value('#1C83E1')   # Azul
                 ),
                 tooltip=['Competencia', 'Puntaje Promedio']
             ).properties(height=300)
-            
             st.altair_chart(chart, use_container_width=True)
             
-            # --- DETALLE DE ESTUDIANTES (HEATMAP) ---
-            st.subheader("📋 Detalle por Estudiante (Semáforo)")
-            st.caption("Identifica rápidamente quién falló en qué área.")
-            
+            # TABLA SEMÁFORO (CORREGIDA)
+            st.subheader("📋 Detalle por Estudiante")
             cols_detalle = ['Fecha_Registro', 'Nombre', 'Grupo', 
                            'CRI_Recoleccion', 'CRI_Sintesis', 'CRI_Hipotesis', 
                            'CRI_Interpretacion', 'OMS_Manejo', 'Puntaje_Total']
             
-            # Formateo con Pandas Styler (Mapa de calor)
+            cols_numericas_style = ['CRI_Recoleccion', 'CRI_Sintesis', 'CRI_Hipotesis', 
+                                   'CRI_Interpretacion', 'OMS_Manejo']
+            
+            # AQUÍ ESTÁ LA CORRECCIÓN CLAVE: subset=cols_numericas_style
             st.dataframe(
                 df_view[cols_detalle].style.background_gradient(
-                    subset=['CRI_Recoleccion', 'CRI_Sintesis', 'CRI_Hipotesis', 
-                            'CRI_Interpretacion', 'OMS_Manejo'],
+                    subset=cols_numericas_style,
                     cmap='RdYlGn', vmin=0, vmax=2
-                ).format("{:.1f}"),
+                ).format(
+                    "{:.1f}", subset=cols_numericas_style + ['Puntaje_Total']
+                ),
                 use_container_width=True
             )
             
-            # --- ANÁLISIS DE SESGOS ---
+            # SESGOS
             st.divider()
             col_b1, col_b2 = st.columns(2)
-            
             with col_b1:
-                st.subheader("🧠 Sesgos Cognitivos Frecuentes")
+                st.subheader("🧠 Sesgos Detectados")
                 if 'Sesgos' in df_view.columns:
                     all_biases = []
                     for s in df_view['Sesgos'].astype(str):
-                        # Limpiar y separar
                         items = [b.strip() for b in s.split(',') if b.strip() and b.strip().lower() != 'ninguno']
                         all_biases.extend(items)
-                    
                     if all_biases:
                         st.bar_chart(pd.Series(all_biases).value_counts())
-                    else:
-                        st.info("No se han detectado sesgos significativos.")
-
+            
             with col_b2:
-                st.subheader("📝 Illness Scripts (Cualitativo)")
-                st.caption("Muestra aleatoria de 5 representaciones del problema escritas por estudiantes.")
+                st.subheader("📝 Scripts (Muestra)")
                 samples = df_view['Illness_Script'].dropna().sample(min(5, len(df_view)))
-                for i, script in enumerate(samples):
-                    st.text(f"📝 {script}")
-
+                for s in samples: st.text(f"• {s}")
         else:
             st.info("Base de datos vacía.")
+
 
 
 
