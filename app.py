@@ -273,5 +273,3 @@ with tabs[1]:
         else:
             st.info("No hay datos cargados.")
 
-
-
